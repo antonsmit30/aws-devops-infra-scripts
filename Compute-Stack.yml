@@ -1,0 +1,338 @@
+# ASG Practice
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  KeyName:
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the ASG instances.
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: Select a VPC that allows instances to access the Internet.
+  SubnetId:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Description: Select at least two subnets in your selected VPC.
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+    ConstraintDescription: Please choose a valid instance type.
+Mappings:
+  AWSRegionToAMI:
+    eu-west-1:
+      AMIID: ami-01efa4023f0f3a042
+
+Resources:
+  # ASGALB:
+  #   Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+  #   Properties:
+  #     Name: asgalb
+  #     Scheme: internet-facing
+  #     LoadBalancerAttributes:
+  #       - Key: idle_timeout.timeout_seconds
+  #         Value: '30'
+  #     Subnets: !Ref SubnetId
+  #     SecurityGroups:
+  #       - !ImportValue Devops-Container-Stack-SG
+  #     Type: application
+  # ALBListener:
+  #   Type: 'AWS::ElasticLoadBalancingV2::Listener'
+  #   DependsOn: ASGServiceRole
+  #   Properties:
+  #     DefaultActions:
+  #       - Type: forward
+  #         TargetGroupArn: !Ref ASGTargetGroup
+  #     LoadBalancerArn: !Ref ASGALB
+  #     Port: '80'
+  #     Protocol: HTTP
+  # ASGALBListenerRule:
+  #   Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+  #   DependsOn: ALBListener
+  #   Properties:
+  #     Actions:
+  #       - Type: forward
+  #         TargetGroupArn: !Ref ASGTargetGroup
+  #     Conditions:
+  #       - Field: path-pattern
+  #         Values:
+  #           - /
+  #     ListenerArn: !Ref ALBListener
+  #     Priority: 1
+  # ASGTargetGroup:
+  #   Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+  #   DependsOn: ASGALB
+  #   Properties:
+  #     HealthCheckIntervalSeconds: 10
+  #     HealthCheckPath: /
+  #     HealthCheckProtocol: HTTP
+  #     HealthCheckTimeoutSeconds: 5
+  #     HealthyThresholdCount: 2
+  #     Name: ASGTargetGroup
+  #     Port: 80
+  #     Protocol: HTTP
+  #     UnhealthyThresholdCount: 2
+  #     VpcId: !Ref VpcId
+
+
+      # HealthCheckGracePeriod: 300
+      # TargetGroupARNs:
+      #   - !Ref ASGTargetGroup
+
+  ASGAutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      VPCZoneIdentifier: !Ref SubnetId
+      LaunchConfigurationName: !Ref WebServerInstances
+      MinSize: '1'
+      MaxSize: '2'
+      DesiredCapacity: '1'
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: 'true'
+  WebServerInstances:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      ImageId: !FindInMap 
+        - AWSRegionToAMI
+        - !Ref 'AWS::Region'
+        - AMIID
+      SecurityGroups:
+        - !ImportValue Devops-Container-Stack-SG
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: !Ref KeyName
+      UserData: 
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash -xe
+            # Get the latest CloudFormation package
+            yum update -y aws-cfn-bootstrap
+            # Start cfn-init
+            /opt/aws/bin/cfn-init -s ${AWS::StackId} -r WebServerInstances  -c SetupConfig --region ${AWS::Region}
+
+            # signal status message from cfs-init command
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource ASGAutoScalingGroup --region ${AWS::Region}
+    Metadata:
+      Comment: Install HTTPD and turn on package
+      AWS::CloudFormation::Init:
+        configSets:
+          SetupConfig:
+            - "config1"
+        config1:
+          packages:
+            yum:
+              ruby: []
+              wget: []
+              httpd: []
+          commands:
+            updateyum:
+              command: !Sub "echo 'This server was installed on stack ${AWS::StackName}' > /var/www/html/index.html"
+            CodeDeploySetup:
+              command: !Sub "wget https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/latest/install; chmod +x ./install; ./install auto"
+            
+          services:
+            sysvinit:
+              codedeploy-agent:
+                enabled: "true"
+                ensureRunning: "true"
+              httpd:
+                enabled: "true"
+                ensureRunning: "true"
+
+  ASGServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+                  - 'elasticloadbalancing:DeregisterTargets'
+                  - 'elasticloadbalancing:Describe*'
+                  - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+                  - 'elasticloadbalancing:RegisterTargets'
+                  - 'ec2:Describe*'
+                  - 'ec2:AuthorizeSecurityGroupIngress'
+                Resource: '*'
+  EC2InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2Role
+  EC2Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+
+  ASGDynamicScalingPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AutoScalingGroupName: !Ref ASGAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 80
+
+  ASGTerminationLifecycleHook: 
+    Type: AWS::AutoScaling::LifecycleHook
+    Properties: 
+      AutoScalingGroupName: !Sub "${ASGAutoScalingGroup}"
+      LifecycleTransition: "autoscaling:EC2_INSTANCE_TERMINATING"
+      HeartbeatTimeout: 180
+      DefaultResult: "CONTINUE"
+
+  ASGLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-lifecycle-lambda"
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import boto3
+
+          def lambda_handler(event, context):
+
+              instance_id = event['detail']['EC2InstanceId']
+              asg_name = event['detail']['AutoScalingGroupName']
+              lc_hookname = event['detail']['LifecycleHookName']
+              lc_token = event['detail']['LifecycleActionToken']
+
+              # Initiate Clients for autoscaling and ssm
+              client = boto3.client('autoscaling')
+              ssm_client = boto3.client('ssm')
+
+              upload_s3_command = "aws s3 cp codebackup-`date +%F-%H-%M`.zip s3://"
+              bucket_name = "${ASGS3Bucket}"
+              
+              # Tap into ssm to run command on ec2 instance
+              ssm_response = ssm_client.send_command(
+                  InstanceIds=[ instance_id ],
+                  DocumentName='AWS-RunShellScript',
+                  Parameters={
+                      "commands": [
+                          "#!/bin/bash",
+                          "zip -r codebackup-`date +%F-%H-%M`.zip /var/www/html/*",
+                          upload_s3_command + bucket_name + "/"
+                          
+                      ]
+                  }
+              )
+
+              # Complete lifecycle hook
+              lc_response = client.complete_lifecycle_action(
+                  AutoScalingGroupName=asg_name,
+                  LifecycleActionResult='CONTINUE',
+                  LifecycleActionToken='{}'.format(lc_token),
+                  LifecycleHookName='{}'.format(lc_hookname)
+              )
+
+              return {
+                  'statusCode': 200,
+                  'body': "Success"
+              }
+      Runtime: python3.8
+      Tags:
+        - Key: Name 
+          Value: !Sub "${AWS::StackName}-lifecycle-lambda"
+        - Key: Environment
+          Value: Development
+    DependsOn: ASGAutoScalingGroup
+
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - autoscaling:CompleteLifecycleAction
+            Resource: !Sub arn:aws:autoscaling:*:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/*
+          - Effect: Allow
+            Action:
+            - logs:*
+            Resource: arn:aws:logs:*:*:*
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonSSMFullAccess'
+
+  LifeCycleCWRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: Cloudwatch Rule for ASG lifecycle event to target Lambda
+      Name: !Sub "${AWS::StackName}"
+      State: ENABLED
+      EventPattern:
+        source:
+          - "aws.autoscaling"
+        detail-type:
+          - "EC2 Instance-terminate Lifecycle Action"
+        detail:
+          AutoScalingGroupName: 
+            - !Sub "${ASGAutoScalingGroup}"
+      Targets:
+        - Arn: !Sub "${ASGLambdaFunction.Arn}"
+          Id: !Sub "${AWS::StackName}-lifecycle-lambda"
+    DependsOn: ASGLambdaFunction
+
+  LifeCyclePermissionRule:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Sub "${AWS::StackName}-lifecycle-lambda"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !Sub "${LifeCycleCWRule.Arn}"
+    DependsOn: ASGLambdaFunction
+
+  ASGS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True

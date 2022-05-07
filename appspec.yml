@@ -1,0 +1,14 @@
+version: 0.0
+
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: "arn:aws:ecs:eu-west-1:$ACCOUNT_ID:task-definition/Devops-Container-Stack-aws-devops-app:3"
+        LoadBalancerInfo:
+          ContainerName: "aws-devops-app"
+          ContainerPort: 80
+
+# SOME NOTES FOR LATER
+# Get current task definition number
+# aws ecs describe-task-definition --task-definition Devops-Container-Stack-aws-devops-app --region eu-west-1 --profile devopsprof | jq '.taskDefinition.revision'

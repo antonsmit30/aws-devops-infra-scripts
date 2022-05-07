@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  KeyName:
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the ECS instances.
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: Select a VPC that allows instances to access the Internet.
+  SubnetId:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Description: Select at least two subnets in your selected VPC.
+  DesiredCapacity:
+    Type: Number
+    Default: '1'
+    Description: Number of instances to launch in your ECS cluster.
+  MaxSize:
+    Type: Number
+    Default: '1'
+    Description: Maximum number of instances that can be launched in your ECS cluster.
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+    ConstraintDescription: Please choose a valid instance type.
+Mappings:
+  AWSRegionToAMI:
+    eu-west-1:
+      AMIID: ami-01efa4023f0f3a042
+Resources:
+  CICDSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: CICD Security Group
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - CidrIp: localipremoved/32
+        IpProtocol: tcp
+        FromPort: 8080
+        ToPort: 8080
+      - CidrIp: localipremoved/32
+        IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+
+  CICDInstances:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      AvailabilityZone: eu-west-1a
+      ImageId: !FindInMap 
+        - AWSRegionToAMI
+        - !Ref 'AWS::Region'
+        - AMIID
+      SecurityGroupIds:
+        - !GetAtt CICDSecurityGroup.GroupId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: !Ref KeyName
+      Tags:
+        - Key: Name
+          Value: jenkins-instance
+      UserData: 
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash -xe
+            # Get the latest CloudFormation package
+            yum update -y aws-cfn-bootstrap
+            # Start cfn-init
+            /opt/aws/bin/cfn-init -s ${AWS::StackId} -r CICDInstances  -c SetupConfig --region ${AWS::Region}
+
+            # signal status message from cfs-init command
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource CICDWaitCondition --region ${AWS::Region}
+    Metadata:
+      Comment: Install Jenkins package
+      AWS::CloudFormation::Init:
+        configSets:
+          SetupConfig:
+            - "config1"
+            - "config2"
+        config1:
+          commands:
+            updateyum:
+              command: "yum update -y"
+            awslinuxextra:
+              command: "amazon-linux-extras install epel -y"
+            getJenkins:
+              command: "wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo"
+            importKey:
+              command: "rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io.key"
+            upgradeYum:
+              command: "yum upgrade -y"
+        config2:
+          packages:
+            yum:
+              java-1.8.0-openjdk-devel: []
+              jenkins: []
+              npm: []
+              git: []
+          services:
+            sysvinit:
+              jenkins:
+                enabled: "true"
+                ensureRunning: "true"
+
+
+  CICDWaitCondition:
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT10M # Wait 10minutes before deciding timeout
+        Count: 1 # one signal needed
+    Type: AWS::CloudFormation::WaitCondition
+
+  
+  EC2InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2Role
+  EC2Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSCodePipelineCustomActionAccess'
+        - 'arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess'
+        - 'arn:aws:iam::aws:policy/AWSCodeCommitPowerUser'
+          
+            
