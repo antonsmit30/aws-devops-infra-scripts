@@ -38,7 +38,7 @@ Parameters:
 Mappings:
   AWSRegionToAMI:
     eu-west-1:
-      AMIID: ami-06bb94c46ddc47feb
+      AMIID: ami-0c21ebd9e0dbd6249
     
 Resources:
   ECSCluster:
